@@ -1,0 +1,328 @@
+#Data Collection, Pre-processing and visualisation using Goibibo data
+#Data Sources : city_list.csv ( static file), Hotel data API link: https://developer.goibibo.com/docs#/hotel_search_by_city, Reviews API link : Hotel Reviews API
+#The static file (city_list.csv) contains 7489 cities, we have taken first 49 cities for this project
+#Importing relevant Packages and suppressing warnings
+
+import csv, urllib, requests, numpy
+import pandas as pd
+import matplotlib.pyplot as plt
+from wordcloud import WordCloud, STOPWORDS
+import warnings
+warnings.filterwarnings('ignore')
+
+#Declaring the below 2 connectors variables required to connect to Goibibo Developer account:
+App Key
+App ID
+#App Key and App ID for connecting to Goibibo Developer account
+
+app_key='6505ea378a301e94b9bb8508feb37607'
+app_id='66c59a32'
+
+#Creating csv file to store data gathered from API's and a function is created to append json responses
+
+def create_file (file_loc, headings):  
+  with open(file_loc, "w",newline='') as write_file:
+    f = csv.writer(write_file)
+    f.writerow(headings)
+  write_file.close()
+  
+def write_row(file_loc,response):
+  with open(file_loc, "a",newline='') as write_file:
+    f = csv.writer(write_file)
+    f.writerow(response)
+  write_file.close()
+
+#Function for performing the below tasks:
+#Iterating through the hotel list per city
+#Getting the hotel review data per hotel using API : Hotel Reviews API
+#Calling function to write the data gathered
+
+def consolidate_hotel_reviews(hotels,file_loc,headings):
+  #Iterating over each hotel
+   for hotel in hotels:
+    url_hotel_review = 'http://ugc.goibibo.com/api/HotelReviews/forWeb?app_id='+app_id+'&app_key='+app_key+'&vid='+hotel+'&limit=100&offset=0'
+    response_review =requests.get(url_hotel_review).json()
+    for response in response_review:
+      response_complete = {}
+      for key in headings:
+        if key not in response.keys():
+          response_complete[key] = ''
+        else:
+          response_complete[key] = response[key]
+      write_row(file_loc,response_complete.values())
+
+#Function for performing the below tasks: to extract city to hotel mapping using API
+#Read the static file (city_list.csv) for list of cities - obtained from the goibibo site
+#Get the list of hotels in every city (if any) using the API [Search Hotels by City](https://developer.goibibo.com/docs#/hotel_search_by_city
+#Call the above function to get the hotel review data
+
+def write_file(file_loc,headings):
+  f=open('city_list.csv','r')
+  cities=f.readlines()
+  f.close()
+  city_list=[city.strip().split(',')[1].replace('"','') for city in cities[1:]]
+  for city in city_list:
+    url_hotels='http://developer.goibibo.com/api/voyager/get_hotels_by_cityid/?app_id='+app_id+'&app_key='+app_key+'&city_id='+city
+    hotels_per_city = list(requests.get(url_hotels).json()['data'].keys())
+    consolidate_hotel_reviews(hotels_per_city,file_loc,headings) #Above function is being called
+​
+#Actual execution of the program to invoke the APIs. "headings" is the list of keys which are present in the retrieved json data
+
+headings = ['voyagerId','hotelName','hotelCity','hotelReply','bookingDetails','recommendations','reviewTitle','reviewContent','reviewer','totalRating','monthOfStay','genericId','isAnonymous','ratings','createdAt','submittedAt','fromBooking','deviceType','imageCount','likeCount','commentCount','id','reviewerId','isLiked','images','firstName','lastName','featured']
+create_file("hotels_reviews.csv", headings)
+write_file("hotels_reviews.csv",headings)
+
+#*Data Preprocessing *
+#Data Preparation step :
+#Treating {} as NaN (to handle missing values)
+#Reading data from above generated csv and storing in dataframe
+#Data Selection Step : Only relevant fields extracted and taken into consideration
+
+missing_values = ['{}']
+df = pd.read_csv("hotels_reviews.csv",index_col="id",na_values = missing_values)
+cols_of_interest = ['voyagerId','hotelName','hotelCity','reviewContent','totalRating','monthOfStay','ratings','reviewerId','featured']
+df1 = df[cols_of_interest]
+
+#Data Cleaning Step:
+#Review Content contained missing values, they were replaced by "Review not available".
+#Total Ratings contained missing values, they were replaced by the mean ratings, grouped by the hotel id's (voyagerId)
+
+df1['reviewContent'].fillna("Review not available",inplace=True)
+df1['totalRating'] = df1.groupby("voyagerId").transform(lambda x: x.fillna(int(round(x.mean()))))
+
+#*Data Extraction Step : *
+#'monthOfStay' was in the format - 'yyyymm', applied feature engineering to extract 2 features - year and month - which were added to dataframe
+#'ratings' were in the format = {'Amenities: x, Location : y, ...''}, applied feature engineering to extract individual ratings and created 4 new columns which were added to dataframe
+#Data Cleaning was performed on the individual rating columns created above.
+#A new feature 'Relevance' was created based on the year of the published reviews( 0 for year < 2018 and 1 for year >= 2018)
+#monthOfStay converted to month and year
+
+years = df1['monthOfStay'].apply(str).str.slice(0,4,1)
+months = df1['monthOfStay'].apply(str).str.slice(4,6,1)
+df1['year'] = years
+df1['month'] = months
+​
+#Ratings converted to individual columns
+
+def a(rating,k):
+    if type(rating) == float:
+        return rating
+    else:
+        z = eval(rating)
+        for i,v in z.items():
+            if k == i:
+                return v
+for key in ['Amenities','Value For Money','Location','Service Quality']:
+    df1[key] = df1['ratings'].apply(lambda x: a(x,key))
+    
+#Filling in missing values, NaN was replaced with the total rating
+
+for key in ['Amenities','Value For Money','Location','Service Quality']:
+  df1[key].fillna(df1['totalRating'],inplace=True)
+  
+#Creating a new feature: Relevance
+
+def f(row):
+    if int(row['year']) >= 2018:
+        val = 1
+    else:
+        val = 0
+    return val
+df1['relevance'] =  df1.apply(f, axis=1)
+
+#Visualising the dataframe
+
+df1.head()
+
+#Data Visualisation
+#Below graphs and wordcloud were created by analysing the above cleaned and processed data
+
+#Graph 1 : Average ratings of cities
+
+df1['totalRating'] = df1['totalRating'].astype(int)
+city_groups = df1.groupby('hotelCity')
+ratings_mean_citywise = city_groups['totalRating'].mean()
+plt.figure()
+plt.bar(ratings_mean_citywise.keys(),ratings_mean_citywise.values,width=0.5,color='maroon')
+plt.xlabel('Cities')
+plt.ylabel('Average ratings')
+plt.title('Average ratings of Cities')
+plt.show()
+
+#Graph 2: Top 10 Cities based on number of Hotels
+
+#top 10 cities based on number of hotels
+city_groups = df1.groupby('hotelCity')
+num_of_hotels = city_groups['voyagerId'].nunique()
+num_of_hotels = num_of_hotels.sort_values(0,False)
+top_10_cities = num_of_hotels[:10]
+plt.figure()
+plt.bar(top_10_cities.keys(),top_10_cities.values,width=0.5,color='navy')
+plt.xlabel('Cities')
+plt.ylabel('Hotels in Cities')
+plt.title('Top 10 Cities based on number of Hotels')
+plt.show()
+
+Graph 3: Top 10 Hotels (in the city with highest number of hotels) based on number of Reviews
+
+list_top_10_cities = top_10_cities.keys().tolist()
+city_hotel_groups = df1[df1.hotelCity==list_top_10_cities[0]].groupby('hotelName')
+top_10_hotels_review_count = city_hotel_groups.count()['totalRating'].sort_values(0,False)[:10]
+plt.figure()
+plt.barh(top_10_hotels_review_count.keys(),top_10_hotels_review_count.values,color='maroon')
+plt.xlabel('Hotels')
+plt.ylabel('Review Count')
+plt.title('Top 10 Hotels based on number of Reviews')
+plt.show()
+
+Graph 4: Top 10 Hotels (in the city with highest number of hotels) based on Mean Ratings
+
+top_10_hotels_mean_rating = city_hotel_groups.mean()['totalRating'].sort_values(0,False)[:10]
+plt.figure()
+plt.barh(top_10_hotels_mean_rating.keys(),top_10_hotels_mean_rating.values,color='navy')
+plt.xlabel('Mean Ratings')
+plt.ylabel('Hotels')
+plt.title('Top 10 Hotels based on Mean Ratings')
+plt.show()
+
+Word Cloud 1: Overall Review content
+
+stopwords = set(STOPWORDS)
+stopwords.add("Review")
+stopwords.add("nan")
+stopwords.add("available")
+def show_wordcloud(data, title = None):
+    wordcloud = WordCloud(
+        background_color='white',
+        stopwords=stopwords,
+        max_words=50,
+        max_font_size=40, 
+        scale=3,
+        random_state=1 # chosen at random by flipping a coin; it was heads
+    ).generate(str(data))
+​
+    fig = plt.figure(1, figsize=(12, 12))
+    plt.axis('off')
+    if title: 
+        fig.suptitle(title, fontsize=20)
+        fig.subplots_adjust(top=2.3)
+​
+    plt.imshow(wordcloud)
+    plt.show()
+​
+show_wordcloud(df1['reviewContent'].values, 'Overall Hotel Review')
+
+Word Cloud 2: Good Review content (Hotels which have a total rating > 4)
+
+goodRatings=df1[df1.totalRating.values >= 4]['reviewContent'].values
+show_wordcloud(goodRatings, 'Good Hotel Review')
+
+Graph 5 : Top 10 Reviewers based on number of reviews
+
+reviewer_id_groups = df1.groupby('reviewerId')
+top_10_reviewers = reviewer_id_groups.count()['totalRating'].sort_values(0,False)[:10]
+plt.figure()
+plt.barh(top_10_reviewers.keys(),top_10_reviewers.values,color='navy')
+plt.xlabel('Number of Reviews')
+plt.ylabel('Reviewers')
+plt.title('Top 10 Reviewers based on number of reviews')
+plt.show()
+
+Graph 6: Top 10 Reviewers based on variance in ratings
+
+top_10_reviewers_list = top_10_reviewers.keys().tolist()
+top_10_reviewers_data = df1[df1.reviewerId.isin(top_10_reviewers_list)].groupby('reviewerId')
+top_10_reviewers_var_rating = top_10_reviewers_data.var()['totalRating'].sort_values(0,True)
+plt.figure()
+plt.barh(top_10_reviewers_var_rating.keys(),top_10_reviewers_var_rating.values,color='maroon')
+plt.xlabel('Variance')
+plt.ylabel('Reviewers')
+plt.title('Top 10 Reviewers based on variance in ratings')
+plt.show()
+
+Graph 7: Total Ratings Statistics found on hotel with the highest number of reviews
+
+hotel_names = top_10_hotels_review_count.keys().tolist()
+total_rating_stats = df1[df1.hotelName==hotel_names[0]]['totalRating'].describe()
+plt.figure()
+plt.bar(total_rating_stats.keys(),total_rating_stats.values,color='navy')
+plt.xlabel('Parameters')
+plt.ylabel('Values')
+plt.title('Total Ratings Statistics')
+plt.show()
+
+Graph 8: Featured hotels which are highly rated (mean rating >=4)
+
+featured_hotels = df1[df1.featured==True].groupby('hotelName')
+series_hotels = round(featured_hotels.mean()['totalRating']).apply(int)
+high_rated_featured_hotels = series_hotels[series_hotels.values>=4]
+low_rated_featured_hotels = series_hotels[series_hotels.values<4]
+​
+plt.figure()
+plt.barh(high_rated_featured_hotels.keys(),high_rated_featured_hotels.values,color='maroon')
+plt.xlabel('Average Ratings')
+plt.ylabel('Hotels')
+plt.title('High Rated Featured Hotels')
+plt.show()
+
+Graph 9 : Featured hotels which have low ratings (mean rating < 4)
+
+plt.figure()
+plt.barh(low_rated_featured_hotels.keys(),low_rated_featured_hotels.values,color='navy')
+plt.xlabel('Average Ratings')
+plt.ylabel('Hotels')
+plt.title('Low Rated Featured Hotels')
+plt.show()
+
+Graph 10 : Changes in mean ratings for a hotel over the years
+
+relevance_data = df1[df1.relevance==1].groupby('hotelName')
+relevant_data = relevance_data.mean()['totalRating']
+list_relevant_hotels = relevance_data.mean()['totalRating'].keys().tolist()
+less_relevant_data = df1[(df1.hotelName==list_relevant_hotels[20]) & (df1.relevance==0)]
+less_relevant_mean_rating = less_relevant_data['totalRating'].mean()
+relevant_mean_rating = relevant_data[20]
+tick_labels=[0,1]
+plt.figure()
+plt.plot([0,1],[less_relevant_mean_rating,relevant_mean_rating])
+plt.xticks(tick_labels)
+plt.xlabel('Relevance')
+plt.ylabel('Mean Rating')
+plt.title('Changes in mean ratings over the years')
+Text(0.5, 1.0, 'Changes in mean ratings over the years')
+
+Graph 11: Month wise data for Panvel and Mantralayam to find out peak seasons for these 2 cities
+
+monthly_data = df1.groupby(['hotelCity','month'])
+peak_season_data = monthly_data['month'].count()
+level0_values = peak_season_data.index.get_level_values(0)
+level1_values = peak_season_data.index.get_level_values(1)
+peak_season_data_monthly_panvel = peak_season_data[level0_values=='Panvel']
+peak_season_data_monthly_mantralayam = peak_season_data[level0_values=='Mantralayam']
+plt.figure()
+plt.plot(peak_season_data_monthly_panvel.index.get_level_values(1),peak_season_data_monthly_panvel.values,color='navy')
+plt.plot(peak_season_data_monthly_mantralayam.index.get_level_values(1),peak_season_data_monthly_mantralayam.values,color='maroon')
+plt.xlabel('Months')
+plt.ylabel('Review Count')
+plt.title('Month wise data for Panvel and Mantralayam')
+plt.show()
+
+Graph 12 : Individual ratings ( Amenties, Value for money , location and service quality ) for 3 hotels
+
+city_hotels_groups = df1[df1.hotelCity==list_top_10_cities[0]].groupby('hotelName')
+amenities_mean_ratings = city_hotels_groups.mean()['Amenities'].sort_values(0,False)[:3]
+valueForMoney_mean_ratings = city_hotels_groups.mean()['Value For Money'].sort_values(0,False)[:3]
+location_mean_ratings = city_hotels_groups.mean()['Location'].sort_values(0,False)[:3]
+serviceQuality_mean_ratings = city_hotels_groups.mean()['Service Quality'].sort_values(0,False)[:3]
+names = ['Amenities', 'Value For Money', 'Location','Service Quality']
+plt.figure(figsize=(12,4))
+plt.barh(amenities_mean_ratings.keys(),amenities_mean_ratings.values,height=0.3,color='navy')
+plt.barh(amenities_mean_ratings.keys(),valueForMoney_mean_ratings.values,height=0.3,color='maroon',left=amenities_mean_ratings.values)
+plt.barh(amenities_mean_ratings.keys(),location_mean_ratings.values,color='black',height=0.3,left=amenities_mean_ratings.values+valueForMoney_mean_ratings.values)
+plt.barh(amenities_mean_ratings.keys(),serviceQuality_mean_ratings.values,color='cyan',height=0.3,left=amenities_mean_ratings.values+valueForMoney_mean_ratings.values+location_mean_ratings.values)
+plt.xlabel('Mean Individual Ratings')
+plt.ylabel('Hotels')
+plt.title('Individual Ratings for 3 hotels')
+plt.legend(names)
+plt.show()
+
